@@ -177,12 +177,12 @@ def evaluate_llm_model(client, few_shot_examples: List[Dict], X_test, y_test, mo
 
 def main():
     st.set_page_config(
-        page_title="Red Flag vs Green Flag LLM Classifier",
+        page_title="Wine Quality Classifier",
         page_icon="🚩",
         layout="wide"
     )
     
-    st.title("🚩 Red Flag vs Green Flag LLM Many-Shot Classifier")
+    st.title("Wine Quality Classifier")
     st.markdown("*Powered by OpenAI GPT with Few-Shot Learning*")
     st.markdown("---")
     
