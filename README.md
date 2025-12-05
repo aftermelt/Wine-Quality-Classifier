@@ -1,3 +1,5 @@
+# brauh gaimme as second im gott
+
 # Red Flag vs Green Flag LLM Classifier
 
 A Streamlit web application for many-shot classification of text as "Red Flag" or "Green Flag" using Large Language Models (LLMs) with few-shot prompting, based on consensus-annotated data from two groups.
