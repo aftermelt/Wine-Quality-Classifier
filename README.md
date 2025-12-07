@@ -1,7 +1,6 @@
 # Wine Quality Classifier
 
-A Streamlit web application for many-shot classification of text as "Red Flag" or "Green Flag" using Large Language Models (LLMs) with few-shot prompting, based on a Kaggle Dataset
-
+A Streamlit web application for classifying wine quality as "High Quality" or "Low Quality" using Large Language Models (LLMs) with few-shot prompting, based on chemical property analysis of a wine dataset from Kaggle.
 
 ## Data
 
