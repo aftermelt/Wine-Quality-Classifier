@@ -10,505 +10,465 @@ import random
 import time
 from typing import List, Dict
 
-def load_data():
-    """Load and combine data from both consensus files."""
-    data_files = [
-        "data/Consensus items : Group 1 - Red Flag vs Green Flag.json",
-        "data/Consensus items: Group 2 - Red Flag vs Green Flag.json"
-    ]
-    
-    combined_data = []
-    
-    for file_path in data_files:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                combined_data.extend(data)
-        except FileNotFoundError:
-            st.error(f"Data file not found: {file_path}")
-            return pd.DataFrame()
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON in file: {file_path}")
-            return pd.DataFrame()
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(combined_data)
-    
-    # Filter out 'Neither' labels for binary classification
-    df = df[df['gold_label'].isin(['Red Flag', 'Green Flag'])]
-    
-    return df
 
-def create_balanced_split(df, test_size=0.3, random_state=42):
-    """Create a balanced train-test split for few-shot examples and evaluation."""
-    X = df['sentence']
-    y = df['gold_label']
-    
-    # Stratified split to maintain class balance
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, 
-        test_size=test_size, 
-        random_state=random_state, 
-        stratify=y
-    )
-    
-    return X_train, X_test, y_train, y_test
+""" load wine data from wine_data 
+"""
+def load_data(file_path='data/wine_data.csv'):
+    try:
+        df = pd.read_csv(file_path)  # Read CSV file
+        return df
+    except FileNotFoundError:
+        st.error(f"Data file not found: {file_path}")
+        return pd.DataFrame()
 
-def create_few_shot_examples(X_train, y_train, n_examples_per_class=10):
+
+def preprocess_data(df):
+    """Preprocess the wine dataset."""
+    # Convert quality to binary classification (good vs bad wine)
+    # Quality <= 5: Low Quality, Quality > 5: High Quality
+    df['quality_label'] = df['quality'].apply(lambda x: 'High Quality' if x > 5 else 'Low Quality')
+
+    # Features and target
+    feature_columns = ['fixed_acidity', 'volatile_acidity', 'citric_acid', 'residual_sugar',
+                       'chlorides', 'free_sulfur_dioxide', 'total_sulfur_dioxide',
+                       'density', 'pH', 'sulphates', 'alcohol']
+
+    return feature_columns, df
+
+
+def create_few_shot_examples(df, n_examples_per_class=10):
     """Create balanced few-shot examples for the LLM prompt."""
-    df_train = pd.DataFrame({'sentence': X_train, 'label': y_train})
-    
     few_shot_examples = []
-    
+
     # Get examples for each class
-    for label in ['Red Flag', 'Green Flag']:
-        class_examples = df_train[df_train['label'] == label].sample(
-            n=min(n_examples_per_class, len(df_train[df_train['label'] == label])),
+    for label in ['Low Quality', 'High Quality']:
+        class_examples = df[df['quality_label'] == label].sample(
+            n=min(n_examples_per_class, len(df[df['quality_label'] == label])),
             random_state=42
         )
-        
+
         for _, row in class_examples.iterrows():
+            example_features = {
+                'fixed_acidity': row['fixed_acidity'],
+                'volatile_acidity': row['volatile_acidity'],
+                'citric_acid': row['citric_acid'],
+                'residual_sugar': row['residual_sugar'],
+                'chlorides': row['chlorides'],
+                'free_sulfur_dioxide': row['free_sulfur_dioxide'],
+                'total_sulfur_dioxide': row['total_sulfur_dioxide'],
+                'density': row['density'],
+                'pH': row['pH'],
+                'sulphates': row['sulphates'],
+                'alcohol': row['alcohol']
+            }
             few_shot_examples.append({
-                'sentence': row['sentence'],
-                'label': row['label']
+                'features': example_features,
+                'label': label
             })
-    
+
     # Shuffle the examples
     random.shuffle(few_shot_examples)
     return few_shot_examples
 
-def build_few_shot_prompt(few_shot_examples: List[Dict], target_text: str) -> str:
-    """Build a few-shot prompt for the LLM."""
-    
-    prompt = """You are a text classifier that categorizes sentences as either "Red Flag" or "Green Flag".
 
-    Your task is to label the sentence as either 'Green flag' or 'Red flag'. 
-    Base your judgment on the main perspective implied by the text, as follows: If the text contains pronouns like 'I' and 'you', imagine you are hearing the speaker or the speaker is addressing you, and ask yourself: "Is this a green flag or a red flag?" If the text has a 3rd person perspective (with pronouns like "s/he" and "them"), put yourself in the narrator's shoes and ask yourself: "Is this a green or a red flag?"
-    Try to consider the sentence as a stand-alone text (even if you know the source).
+def build_few_shot_prompt(few_shot_examples: List[Dict], target_features: Dict) -> str:
+    """Build a few-shot prompt for the LLM."""
+
+    prompt = """You are a wine quality classifier that categorizes wines as either "Low Quality" or "High Quality".
+
+Based on the chemical properties of wine, classify it as:
+- "Low Quality": Quality score ≤ 5
+- "High Quality": Quality score > 5
 
 Here are some examples:
 
 """
-    
+
     # Add few-shot examples
     for example in few_shot_examples:
-        prompt += f'Text: "{example["sentence"]}"\nClassification: {example["label"]}\n\n'
-    
-    # Add the target text
-    prompt += f'Text: "{target_text}"\nClassification:'
-    
+        features_str = ", ".join([f"{k}: {v}" for k, v in example['features'].items()])
+        prompt += f'Wine Properties: {features_str}\nClassification: {example["label"]}\n\n'
+
+    # Add the target features
+    target_str = ", ".join([f"{k}: {v}" for k, v in target_features.items()])
+    prompt += f'Wine Properties: {target_str}\nClassification:'
+
     return prompt
 
-def predict_with_llm(client, few_shot_examples: List[Dict], texts: List[str], model_name: str = "gpt-4.1-nano") -> List[Dict]:
-    """Make predictions using LLM with few-shot prompting."""
-    if isinstance(texts, str):
-        texts = [texts]
-    
-    results = []
-    
-    for text in texts:
-        try:
-            # Clean and normalize text to handle unicode characters
-            cleaned_text = text.encode('ascii', 'ignore').decode('ascii')
-            if not cleaned_text.strip():
-                # If text becomes empty after cleaning, use original with replacement
-                cleaned_text = text.encode('ascii', 'replace').decode('ascii')
-            
-            # Build the prompt
-            prompt = build_few_shot_prompt(few_shot_examples, cleaned_text)
-            
-            # Make API call
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful text classifier. Respond with exactly 'Red Flag' or 'Green Flag' only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=10
-            )
-            
-            prediction = response.choices[0].message.content.strip()
-            
-            # Clean up the prediction
-            if "Red Flag" in prediction:
-                prediction = "Red Flag"
-            elif "Green Flag" in prediction:
-                prediction = "Green Flag"
-            else:
-                # Default to Green Flag if unclear
-                prediction = "Green Flag"
-            
-            result = {
-                'text': text,
-                'prediction': prediction
-            }
-            
-            results.append(result)
-            
-            # Small delay to avoid rate limits
-            time.sleep(0.1)
-            
-        except Exception as e:
-            st.error(f"Error processing text: {e}")
-            # Return default result on error
-            result = {
-                'text': text,
-                'prediction': "Green Flag"
-            }
-            results.append(result)
-    
-    return results
 
-def evaluate_llm_model(client, few_shot_examples: List[Dict], X_test, y_test, model_name: str = "gpt-3.5-turbo"):
+def predict_with_llm(client, few_shot_examples: List[Dict], features_dict: Dict,
+                     model_name: str = "gpt-3.5-turbo") -> Dict:
+    """Make prediction using LLM with few-shot prompting."""
+    try:
+        # Build the prompt
+        prompt = build_few_shot_prompt(few_shot_examples, features_dict)
+
+        # Make API call
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system",
+                 "content": "You are a helpful wine quality classifier. Respond with exactly 'Low Quality' or 'High Quality' only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=10
+        )
+
+        prediction = response.choices[0].message.content.strip()
+
+        # Clean up the prediction
+        if "High Quality" in prediction:
+            prediction = "High Quality"
+        elif "Low Quality" in prediction:
+            prediction = "Low Quality"
+        else:
+            # Default to Low Quality if unclear
+            prediction = "Low Quality"
+
+        result = {
+            'prediction': prediction,
+            'features': features_dict
+        }
+
+        return result
+
+    except Exception as e:
+        st.error(f"Error making prediction: {e}")
+        return {
+            'prediction': "Low Quality",
+            'features': features_dict
+        }
+
+
+def evaluate_llm_model(client, few_shot_examples: List[Dict], df_test,
+                       model_name: str = "gpt-3.5-turbo"):
     """Evaluate the LLM model on test set."""
     # Sample a smaller subset for evaluation to save costs
-    test_sample_size = min(50, len(X_test))
-    test_indices = random.sample(range(len(X_test)), test_sample_size)
-    
-    X_test_sample = [X_test.iloc[i] for i in test_indices]
-    y_test_sample = [y_test.iloc[i] for i in test_indices]
-    
-    # Get predictions
-    predictions = predict_with_llm(client, few_shot_examples, X_test_sample, model_name)
-    y_pred = [pred['prediction'] for pred in predictions]
-    
-    return y_test_sample, y_pred, X_test_sample
+    test_sample_size = min(30, len(df_test))
+    df_sample = df_test.sample(n=test_sample_size, random_state=42)
+
+    y_true = []
+    y_pred = []
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, (_, row) in enumerate(df_sample.iterrows()):
+        features_dict = {
+            'fixed_acidity': row['fixed_acidity'],
+            'volatile_acidity': row['volatile_acidity'],
+            'citric_acid': row['citric_acid'],
+            'residual_sugar': row['residual_sugar'],
+            'chlorides': row['chlorides'],
+            'free_sulfur_dioxide': row['free_sulfur_dioxide'],
+            'total_sulfur_dioxide': row['total_sulfur_dioxide'],
+            'density': row['density'],
+            'pH': row['pH'],
+            'sulphates': row['sulphates'],
+            'alcohol': row['alcohol']
+        }
+
+        result = predict_with_llm(client, few_shot_examples, features_dict, model_name)
+
+        y_true.append(row['quality_label'])
+        y_pred.append(result['prediction'])
+
+        # Update progress
+        progress_bar.progress((idx + 1) / test_sample_size)
+        status_text.text(f"Evaluating: {idx + 1}/{test_sample_size}")
+
+        # Small delay to avoid rate limits
+        time.sleep(0.5)
+
+    progress_bar.empty()
+    status_text.empty()
+
+    return y_true, y_pred
+
 
 def main():
     st.set_page_config(
-        page_title="Red Flag vs Green Flag LLM Classifier",
-        page_icon="🚩",
+        page_title="Wine Quality Classifier",
+        page_icon="🍷",
         layout="wide"
     )
-    
-    st.title("🚩 Red Flag vs Green Flag LLM Many-Shot Classifier")
+
+    st.title("🍷 Wine Quality Classifier")
     st.markdown("*Powered by OpenAI GPT with Few-Shot Learning*")
     st.markdown("---")
-    
+
     # API Configuration
     st.sidebar.header("🔧 API Configuration")
-    api_key = st.sidebar.text_input("OpenAI API Key", type="password", help="Enter your OpenAI API key")
-    model_choice = st.sidebar.selectbox("Model", ["gpt-4.1-nano"], index=0)
-    
+    api_key = st.sidebar.text_input("OpenAI API Key", type="password",
+                                    help="Enter your OpenAI API key")
+    model_choice = st.sidebar.selectbox("Model", ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"], index=0)
+
     if not api_key:
         st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue.")
         return
-    
+
     # Initialize OpenAI client
     try:
         client = openai.OpenAI(api_key=api_key)
     except Exception as e:
         st.error(f"Failed to initialize OpenAI client: {e}")
         return
-    
+
     # Load data
     with st.spinner("Loading data..."):
         df = load_data()
-    
+
     if df.empty:
         st.error("No data available. Please check the data files.")
         return
-    
+
+    # Preprocess data
+    feature_columns, df_processed = preprocess_data(df)
+
     # Sidebar with dataset info
     st.sidebar.header("📊 Dataset Information")
-    st.sidebar.metric("Total Examples", len(df))
-    
-    class_counts = df['gold_label'].value_counts()
+    st.sidebar.metric("Total Examples", len(df_processed))
+
+    class_counts = df_processed['quality_label'].value_counts()
     for label, count in class_counts.items():
-        st.sidebar.metric(f"{label} Examples", count)
-    
+        st.sidebar.metric(f"{label}", count)
+
+    st.sidebar.markdown("---")
+    st.sidebar.info(
+        "💡 Classification:\n- **High Quality**: Score > 5\n- **Low Quality**: Score ≤ 5")
+
     # Configuration
     st.sidebar.header("⚙️ Model Configuration")
-    n_examples_per_class = st.sidebar.slider("Examples per class in prompt", min_value=0, max_value=50, value=5, 
-                                            help="Number of examples for each class (Red/Green Flag) to include in the few-shot prompt")
-    test_size = st.sidebar.slider("Test Set Size (%)", min_value=10, max_value=50, value=30) / 100
-    
-    # Main content - Single column layout
+    n_examples_per_class = st.sidebar.slider("Examples per class in prompt", min_value=3,
+                                             max_value=15, value=5,
+                                             help="Number of examples for each class to include in the few-shot prompt")
+
+    # Display data overview
+    with st.expander("📊 View Dataset Overview", expanded=False):
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.subheader("Sample Data")
+            st.dataframe(df_processed.head(10), use_container_width=True)
+
+        with col2:
+            st.subheader("Quality Distribution")
+            quality_dist = df_processed['quality'].value_counts().sort_index()
+            fig = px.bar(
+                x=quality_dist.index,
+                y=quality_dist.values,
+                labels={'x': 'Quality Score', 'y': 'Count'},
+                title='Wine Quality Distribution'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # Setup LLM
     st.header("🤖 LLM Setup")
-    
+
     if st.button("🔄 Prepare Few-Shot Examples", type="primary"):
         with st.spinner("Preparing few-shot examples..."):
-            # Create train-test split
-            X_train, X_test, y_train, y_test = create_balanced_split(df, test_size=test_size)
-            
             # Create few-shot examples
-            few_shot_examples = create_few_shot_examples(X_train, y_train, n_examples_per_class)
-            
+            few_shot_examples = create_few_shot_examples(df_processed, n_examples_per_class)
+
             # Store in session state
             st.session_state.client = client
             st.session_state.few_shot_examples = few_shot_examples
-            st.session_state.X_test = X_test
-            st.session_state.y_test = y_test
-            st.session_state.X_train = X_train
-            st.session_state.y_train = y_train
+            st.session_state.df_processed = df_processed
             st.session_state.model_name = model_choice
-            
+            st.session_state.feature_columns = feature_columns
+
             st.success(f"✅ Few-shot setup complete!")
-            
+
             # Show few-shot examples info
             st.info(f"""
             **Few-Shot Examples**: {len(few_shot_examples)} total
-            - {len([ex for ex in few_shot_examples if ex['label'] == 'Red Flag'])} Red Flag examples
-            - {len([ex for ex in few_shot_examples if ex['label'] == 'Green Flag'])} Green Flag examples
-            
-            **Test Set**: {len(X_test)} examples  
-            - Red Flag: {sum(y_test == 'Red Flag')}
-            - Green Flag: {sum(y_test == 'Green Flag')}
+            - {len([ex for ex in few_shot_examples if ex['label'] == 'Low Quality'])} Low Quality examples
+            - {len([ex for ex in few_shot_examples if ex['label'] == 'High Quality'])} High Quality examples
             """)
-            
+
             # Show sample few-shot examples
             with st.expander("🔍 View Sample Few-Shot Examples"):
-                for example in few_shot_examples[:6]:  # Show first 6
-                    if example['label'] == 'Red Flag':
-                        st.error(f"**{example['label']}**: {example['sentence'][:100]}...")
+                for example in few_shot_examples[:4]:  # Show first 4
+                    features_str = ", ".join([f"{k}: {v}" for k, v in example['features'].items()])
+                    if example['label'] == 'Low Quality':
+                        st.error(f"**{example['label']}**: {features_str}")
                     else:
-                        st.success(f"**{example['label']}**: {example['sentence'][:100]}...")
-                
-                # Show example prompt
-                st.markdown("---")
-                st.subheader("📝 Example Full Prompt")
-                example_prompt = build_few_shot_prompt(few_shot_examples, "This is an example sentence for demonstration.")
-                st.code(example_prompt, language="text")
-    
+                        st.success(f"**{example['label']}**: {features_str}")
+
     st.markdown("---")
-    
+
     # Show LLM evaluation if available
     if 'few_shot_examples' in st.session_state:
-        st.header("📊 LLM Performance Evaluation")
-        
-        with st.expander("🧪 Evaluate LLM on Test Set", expanded=False):
-            st.warning("⚠️ This will make API calls to evaluate performance. Estimated cost: ~$0.05-0.20")
-            
+        with st.expander("🧪 Evaluate LLM Performance", expanded=False):
+            st.warning(
+                "⚠️ This will make API calls to evaluate performance. Estimated cost: ~$0.05-0.30")
+
             if st.button("🔬 Run LLM Evaluation"):
                 with st.spinner("Evaluating LLM performance on test set..."):
                     try:
-                        y_test_sample, y_pred, X_test_sample = evaluate_llm_model(
+                        # Create test set
+                        test_size = min(30, len(st.session_state.df_processed))
+                        df_test = st.session_state.df_processed.sample(n=test_size, random_state=42)
+
+                        y_true, y_pred = evaluate_llm_model(
                             st.session_state.client,
                             st.session_state.few_shot_examples,
-                            st.session_state.X_test,
-                            st.session_state.y_test,
+                            df_test,
                             st.session_state.model_name
                         )
-                        
+
                         # Store evaluation results
-                        st.session_state.y_test_sample = y_test_sample
+                        st.session_state.y_true = y_true
                         st.session_state.y_pred = y_pred
-                        st.session_state.X_test_sample = X_test_sample
-                        
+
                         # Calculate accuracy
-                        accuracy = accuracy_score(y_test_sample, y_pred)
+                        accuracy = accuracy_score(y_true, y_pred)
                         st.success(f"✅ LLM Evaluation Complete! Test Accuracy: {accuracy:.3f}")
-                        
+
                     except Exception as e:
                         st.error(f"Evaluation failed: {e}")
-        
+
         # Show evaluation results if available
-        if 'y_test_sample' in st.session_state and 'y_pred' in st.session_state:
+        if 'y_true' in st.session_state and 'y_pred' in st.session_state:
             st.subheader("📈 Evaluation Results")
-            
-            # Classification report
+
             try:
                 report = classification_report(
-                    st.session_state.y_test_sample, 
-                    st.session_state.y_pred, 
+                    st.session_state.y_true,
+                    st.session_state.y_pred,
                     output_dict=True
                 )
-                
+
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     st.subheader("Classification Metrics")
-                    # Extract only the class-specific metrics
-                    simple_metrics = {
-                        'Green Flag': {
-                            'Precision': report['Green Flag']['precision'],
-                            'Recall': report['Green Flag']['recall'], 
-                            'F1-Score': report['Green Flag']['f1-score'],
-                            'Accuracy': report['accuracy']
+                    metrics_data = {
+                        'Low Quality': {
+                            'Precision': report['Low Quality']['precision'],
+                            'Recall': report['Low Quality']['recall'],
+                            'F1-Score': report['Low Quality']['f1-score']
                         },
-                        'Red Flag': {
-                            'Precision': report['Red Flag']['precision'],
-                            'Recall': report['Red Flag']['recall'],
-                            'F1-Score': report['Red Flag']['f1-score'],
-                            'Accuracy': report['accuracy']
+                        'High Quality': {
+                            'Precision': report['High Quality']['precision'],
+                            'Recall': report['High Quality']['recall'],
+                            'F1-Score': report['High Quality']['f1-score']
                         }
                     }
-                    metrics_df = pd.DataFrame(simple_metrics).T
-                    st.dataframe(metrics_df.round(3))
-                
+                    metrics_df = pd.DataFrame(metrics_data).T
+                    st.dataframe(metrics_df.round(3), use_container_width=True)
+                    st.metric("Overall Accuracy", f"{report['accuracy']:.3f}")
+
                 with col2:
                     st.subheader("Confusion Matrix")
-                    cm = confusion_matrix(st.session_state.y_test_sample, st.session_state.y_pred)
-                    
+                    cm = confusion_matrix(st.session_state.y_true, st.session_state.y_pred,
+                                          labels=['Low Quality', 'High Quality'])
+
                     fig = px.imshow(
                         cm,
                         text_auto=True,
                         labels={'x': 'Predicted', 'y': 'Actual'},
-                        x=['Green Flag', 'Red Flag'],
-                        y=['Green Flag', 'Red Flag'],
+                        x=['Low Quality', 'High Quality'],
+                        y=['Low Quality', 'High Quality'],
                         color_continuous_scale='Blues'
                     )
                     st.plotly_chart(fig, use_container_width=True)
-            
+
             except Exception as e:
                 st.error(f"Error generating evaluation metrics: {e}")
-                
-            # Show sample predictions
-            st.subheader("🔍 Predictions")
-            sample_df = pd.DataFrame({
-                'Actual': st.session_state.y_test_sample,
-                'Predicted': st.session_state.y_pred,
-                'Text': st.session_state.X_test_sample
-            })
-            
-            # Color code correct/incorrect predictions
-            def highlight_predictions(row):
-                if row['Actual'] == row['Predicted']:
-                    return ['background-color: #1d3a1d'] * len(row)  # Light green for correct
-                else:
-                    return ['background-color: #4d0a0a'] * len(row)  # Light red for incorrect
-            
-            st.dataframe(
-                sample_df.style.apply(highlight_predictions, axis=1),
-                use_container_width=True
-            )
-    
+
     st.markdown("---")
-    
-    st.header("🎯 Make Predictions")
-    
+
+    # Prediction section
+    st.header("🎯 Predict Wine Quality")
+
     if 'few_shot_examples' not in st.session_state:
         st.warning("⚠️ Please prepare few-shot examples first!")
     else:
-        # Single text prediction
-        st.subheader("Single Text Classification")
-        user_text = st.text_area("Enter text to classify:", 
-                                placeholder="Type or paste a sentence here...")
-        
-        if st.button("🔍 Classify Text") and user_text:
-            with st.spinner("Classifying with LLM..."):
-                results = predict_with_llm(
-                    st.session_state.client, 
-                    st.session_state.few_shot_examples, 
-                    [user_text],
+        st.subheader("Enter Wine Properties")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            fixed_acidity = st.number_input("Fixed Acidity", min_value=0.0, max_value=20.0,
+                                            value=7.4, step=0.1,
+                                            help="Tartaric acid - most acids involved with wine")
+            volatile_acidity = st.number_input("Volatile Acidity", min_value=0.0, max_value=2.0,
+                                               value=0.7, step=0.01,
+                                               help="Amount of acetic acid - too high can lead to unpleasant vinegar taste")
+            citric_acid = st.number_input("Citric Acid", min_value=0.0, max_value=2.0, value=0.0,
+                                          step=0.01,
+                                          help="Adds 'freshness' and flavor to wines")
+            residual_sugar = st.number_input("Residual Sugar (g/L)", min_value=0.0, max_value=20.0,
+                                             value=1.9, step=0.1,
+                                             help="Sugar remaining after fermentation stops")
+            chlorides = st.number_input("Chlorides (g/L)", min_value=0.0, max_value=1.0,
+                                        value=0.076, step=0.001,
+                                        help="Amount of salt in the wine")
+            free_sulfur_dioxide = st.number_input("Free Sulfur Dioxide (mg/L)", min_value=0.0,
+                                                  max_value=100.0, value=11.0, step=1.0,
+                                                  help="Prevents microbial growth and oxidation")
+
+        with col2:
+            total_sulfur_dioxide = st.number_input("Total Sulfur Dioxide (mg/L)", min_value=0.0,
+                                                   max_value=300.0, value=34.0, step=1.0,
+                                                   help="Free + bound forms of SO2")
+            density = st.number_input("Density (g/cm³)", min_value=0.9, max_value=1.1, value=0.9978,
+                                      step=0.0001, format="%.4f",
+                                      help="Density of wine relative to water")
+            pH = st.number_input("pH", min_value=2.0, max_value=4.5, value=3.51, step=0.01,
+                                 help="Describes acidity/basicity on scale 0-14")
+            sulphates = st.number_input("Sulphates (g/L)", min_value=0.0, max_value=2.0, value=0.56,
+                                        step=0.01,
+                                        help="Wine additive contributing to SO2 levels")
+            alcohol = st.number_input("Alcohol (%)", min_value=8.0, max_value=15.0, value=9.4,
+                                      step=0.1,
+                                      help="Percent alcohol content")
+
+        st.markdown("---")
+
+        if st.button("🔍 Predict Quality", type="primary", use_container_width=True):
+            features_dict = {
+                'fixed_acidity': fixed_acidity,
+                'volatile_acidity': volatile_acidity,
+                'citric_acid': citric_acid,
+                'residual_sugar': residual_sugar,
+                'chlorides': chlorides,
+                'free_sulfur_dioxide': free_sulfur_dioxide,
+                'total_sulfur_dioxide': total_sulfur_dioxide,
+                'density': density,
+                'pH': pH,
+                'sulphates': sulphates,
+                'alcohol': alcohol
+            }
+
+            with st.spinner("Classifying wine with LLM..."):
+                result = predict_with_llm(
+                    st.session_state.client,
+                    st.session_state.few_shot_examples,
+                    features_dict,
                     st.session_state.model_name
                 )
-                result = results[0]
-            
-            # Display prediction
-            if result['prediction'] == 'Red Flag':
-                st.error(f"🚩 **Red Flag**")
-            else:
-                st.success(f"✅ **Green Flag**")
-        
-        st.markdown("---")
-        
-        # Batch upload
-        st.subheader("📤 Batch Upload & Classification")
-        st.warning("⚠️ Note: LLM classification incurs API costs. Use small batches for testing.")
-        
-        # File upload methods
-        upload_method = st.radio("Choose upload method:", ["Text File", "CSV File", "Manual Input"])
-        
-        if upload_method == "Text File":
-            uploaded_file = st.file_uploader("Upload a text file (one sentence per line)", 
-                                            type=['txt'])
-            if uploaded_file is not None:
-                texts = uploaded_file.read().decode('utf-8').strip().split('\\n')
-                texts = [t.strip() for t in texts if t.strip()]
-                
-                st.info(f"Found {len(texts)} texts. Estimated cost: ~${len(texts) * 0.001:.3f}")
-                
-                if st.button("🔍 Classify Batch (Text File)"):
-                    process_batch_llm(texts)
-        
-        elif upload_method == "CSV File":
-            uploaded_file = st.file_uploader("Upload a CSV file with a 'sentence' column", 
-                                            type=['csv'])
-            if uploaded_file is not None:
-                try:
-                    csv_df = pd.read_csv(uploaded_file)
-                    if 'sentence' in csv_df.columns:
-                        texts = csv_df['sentence'].dropna().tolist()
-                        st.info(f"Found {len(texts)} sentences. Estimated cost: ~${len(texts) * 0.001:.3f}")
-                        
-                        if st.button("🔍 Classify Batch (CSV)"):
-                            process_batch_llm(texts)
-                    else:
-                        st.error("CSV file must contain a 'sentence' column")
-                except Exception as e:
-                    st.error(f"Error reading CSV: {e}")
-        
-        else:  # Manual Input
-            manual_texts = st.text_area("Enter multiple sentences (one per line):", 
-                                       height=150,
-                                       placeholder="Sentence 1\\nSentence 2\\nSentence 3...")
-            
-            if st.button("🔍 Classify Batch (Manual)") and manual_texts:
-                texts = [t.strip() for t in manual_texts.strip().split('\\n') if t.strip()]
-                st.info(f"Processing {len(texts)} texts. Estimated cost: ~${len(texts) * 0.001:.3f}")
-                process_batch_llm(texts)
 
-def process_batch_llm(texts):
-    """Process a batch of texts using LLM and display results."""
-    if not texts:
-        st.warning("No texts to classify!")
-        return
-    
-    with st.spinner(f"Classifying {len(texts)} texts with LLM..."):
-        results = predict_with_llm(
-            st.session_state.client,
-            st.session_state.few_shot_examples,
-            texts,
-            st.session_state.model_name
-        )
-    
-    # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
-    
-    # Summary statistics
-    st.subheader("📊 Batch Results Summary")
-    col1, col2 = st.columns(2)
-    
-    red_count = sum(1 for r in results if r['prediction'] == 'Red Flag')
-    green_count = len(results) - red_count
-    
-    with col1:
-        st.metric("🚩 Red Flags", red_count)
-    with col2:
-        st.metric("✅ Green Flags", green_count)
-    
-    # Detailed results table
-    st.subheader("📋 Detailed Results")
-    
-    # Prepare display dataframe
-    display_df = pd.DataFrame({
-        'Text': [r['text'][:100] + '...' if len(r['text']) > 100 else r['text'] for r in results],
-        'Prediction': results_df['prediction']
-    })
-    
-    # Color code the predictions
-    def color_predictions(row):
-        if row['Prediction'] == 'Red Flag':
-            return ['background-color: #ffebee'] * len(row)
-        else:
-            return ['background-color: #e8f5e8'] * len(row)
-    
-    st.dataframe(
-        display_df.style.apply(color_predictions, axis=1),
-        use_container_width=True,
-        height=400
-    )
-    
-    # Download results
-    csv = results_df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Results as CSV",
-        data=csv,
-        file_name=f"llm_classification_results_{len(results)}_items.csv",
-        mime="text/csv"
-    )
+            st.markdown("---")
+            st.markdown("## 🎊 Prediction Result")
+
+            # Display prediction
+            if result['prediction'] == 'High Quality':
+                st.success("### 🍷 High Quality Wine")
+                st.markdown("**Quality Score: > 5**")
+                st.balloons()
+            else:
+                st.error("### 📉 Low Quality Wine")
+                st.markdown("**Quality Score: ≤ 5**")
+
+            # Show input summary
+            with st.expander("📋 View Input Summary"):
+                input_df = pd.DataFrame([features_dict])
+                st.dataframe(input_df.T, use_container_width=True)
 
 
 if __name__ == "__main__":
