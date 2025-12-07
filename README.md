@@ -2,6 +2,8 @@
 
 A Streamlit web application for classifying wine quality as "High Quality" or "Low Quality" using Large Language Models (LLMs) with few-shot prompting, based on chemical property analysis of a wine dataset from Kaggle.
 
+### https://wine-quality-classifier.streamlit.app/
+
 ## Data
 
 The app uses consensus data from Kaggle:
