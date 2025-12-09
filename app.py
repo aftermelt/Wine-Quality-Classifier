@@ -25,13 +25,13 @@ def create_prompt(examples, user_wine):
 
 # get the prediction
 def predict(client, df, user_wine):
-    # Get 5 random examples
+    # random examples (10 wines)
     examples = df.sample(10)
 
-    # Create prompt
+    # create prompt
     prompt = create_prompt(examples, user_wine)
 
-    # Call GPT
+    # send prompt to chatgpt
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
